@@ -5,6 +5,7 @@ package CDBUtil;
 use strict;
 use DBI;
 use Config::Simple;
+use feature qw(say);
 
 CDBUtil->new();
 
@@ -30,23 +31,30 @@ sub new {
 
 sub gen_deletes {
 	my $self = shift;
-	my ( $start_date, $start_num ) = @_;
+	my ( $start_date, $start_num, $table_selected ) = @_;
+
+	unless ( $start_date && $start_num && $table_selected ) {
+		warn
+			'must supply start_date, start_num and table_selected in CDB UPD gen';
+		return;
+	}
 	my ( $dbh_cdb, $dbh_qad ) = ( $self->{CDB_dbh}, $self->{QAD_dbh} );
 
 	# retreive all tables to be regenerated from qad
+	# change to retrieve specific table groups
 	my $tables_aref = $dbh_qad->selectall_arrayref( "
 		select name 
 		from sys.tables 
 		where 
-		name like 'ws%' 
-		and name not like '%PIT%'
-		and name not like '%changes'" );
+		name = '$table_selected' 
+		--and name not like '%_changes'" );
 
 	my %tables_keys;
 	my %tables_cols;
 	for my $table_aref (@$tables_aref) {
 		my ($table_name) = @$table_aref;
-		
+
+		# get all table primary keys
 		my $table_keys_aref = $dbh_qad->selectall_arrayref( "
 			select distinct column_name, ordinal_position
 			from information_schema.key_column_usage
@@ -55,6 +63,7 @@ sub gen_deletes {
 			order by ordinal_position asc
 		" );
 
+		# get all column data types
 		my $table_types_aref = $dbh_qad->selectall_arrayref( "
 			select column_name, data_type, ordinal_position
 			from information_schema.columns
@@ -62,12 +71,15 @@ sub gen_deletes {
 			order by ordinal_position asc
 		" );
 
+		# build hash of key types
 		my %key_types;
 		for my $type_aref (@$table_types_aref) {
 			my ( $key, $type, $position ) = @$type_aref;
 			$key_types{$key} = $type;
 		}
 
+		# build hash of table's actual keys
+		# also, convert datetime columns to Pervasive Julian numbers
 		for my $key_aref (@$table_keys_aref) {
 			my ( $key, $position ) = @$key_aref;
 			print "$table_name $key $key_types{$key}\n";
@@ -77,12 +89,14 @@ sub gen_deletes {
 			push @{ $tables_keys{$table_name} }, $key;
 		}
 
+		# total column count
 		my $tables_cols_aref = $dbh_qad->selectall_arrayref( "
 			select count(*)
 			from information_schema.columns
 			where table_name = '$table_name'
 		" );
 
+		# odd way of saving number of columns in table to hash...
 		for my $col_aref (@$tables_cols_aref) {
 			my ($col_count) = @$col_aref;
 
@@ -101,6 +115,9 @@ sub gen_deletes {
 		my $num_tabs    = $tables_cols{$table} - $num_keys;
 
 		#print "$num_tabs $tables_cols{$table} $num_keys\n";
+
+		# query to select non-deletes since date/filenum range
+		# TODO: need to change to reverse deletes as well
 		my $query = "select distinct $keys_select
 			from $table
 			where 
